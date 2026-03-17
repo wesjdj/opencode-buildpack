@@ -6,12 +6,13 @@ platform_dir="$2"
 plan_path="$3"
 
 APP="opencode"
+OPENCODE_LAYER="${layers_dir}/opencode"
 
 # --- Determine version ---
 OPENCODE_VERSION=""
 if [[ -f "${platform_dir}/env/OPENCODE_VERSION" ]]; then
   OPENCODE_VERSION=$(cat "${platform_dir}/env/OPENCODE_VERSION")
-  OPENCODE_VERSION="${OPENCODE_VERSION#v}"  # strip leading 'v'
+  OPENCODE_VERSION="${OPENCODE_VERSION#v}"
 fi
 
 # --- Detect OS and architecture ---
@@ -78,13 +79,15 @@ else
   url="https://github.com/anomalyco/opencode/releases/download/v${OPENCODE_VERSION}/${filename}"
 fi
 
-# --- Layer setup and cache check ---
-OPENCODE_LAYER="${layers_dir}/opencode"
-
+# --- Layer cache check ---
 if [[ -f "${OPENCODE_LAYER}.toml" ]]; then
   cached_version=$(grep -oP 'version\s*=\s*"\K[^"]+' "${OPENCODE_LAYER}.toml" || echo "")
   if [[ "${cached_version}" == "${OPENCODE_VERSION}" ]]; then
     echo "-----> Using cached OpenCode ${OPENCODE_VERSION}"
+    # Still need to write env.launch even on cache hit!
+    mkdir -p "${OPENCODE_LAYER}/env.launch"
+    echo -n "${OPENCODE_LAYER}/bin" > "${OPENCODE_LAYER}/env.launch/PATH.prepend"
+    echo -n ":" > "${OPENCODE_LAYER}/env.launch/PATH.delim"
     exit 0
   fi
 fi
@@ -122,14 +125,14 @@ version = "${OPENCODE_VERSION}"
 target = "${target}"
 EOF
 
+# --- Add OpenCode to PATH at launch ---
+mkdir -p "${OPENCODE_LAYER}/env.launch"
+echo -n "${OPENCODE_LAYER}/bin" > "${OPENCODE_LAYER}/env.launch/PATH.prepend"
+echo -n ":" > "${OPENCODE_LAYER}/env.launch/PATH.delim"
+
 # --- Verify ---
 echo "       Verifying installation..."
 "${OPENCODE_LAYER}/bin/opencode" --version 2>/dev/null || echo "       (version check skipped)"
 
 echo "-----> OpenCode ${OPENCODE_VERSION} installed successfully"
-
-# --- Add OpenCode to PATH at launch ---
-mkdir -p "${OPENCODE_LAYER}/env.launch"
-echo -n "${OPENCODE_LAYER}/bin" > "${OPENCODE_LAYER}/env.launch/PATH.prepend"
-echo -n ":" > "${OPENCODE_LAYER}/env.launch/PATH.delim"
 

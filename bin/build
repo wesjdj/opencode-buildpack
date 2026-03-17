@@ -128,3 +128,8 @@ echo "       Verifying installation..."
 
 echo "-----> OpenCode ${OPENCODE_VERSION} installed successfully"
 
+# --- Add OpenCode to PATH at launch ---
+mkdir -p "${OPENCODE_LAYER}/env.launch"
+echo -n "${OPENCODE_LAYER}/bin" > "${OPENCODE_LAYER}/env.launch/PATH.prepend"
+echo -n ":" > "${OPENCODE_LAYER}/env.launch/PATH.delim"
+

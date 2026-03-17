@@ -3,5 +3,6 @@ channels:
   - conda-forge
 dependencies:
   - jupyterlab
-  - ncurses
   - tmux
+  - ncurses=6.4
+  - libtinfo=6.4

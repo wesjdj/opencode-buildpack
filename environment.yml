@@ -1,6 +1,5 @@
 name: opencode-env
 channels:
   - conda-forge
-  - defaults
 dependencies:
   - jupyterlab

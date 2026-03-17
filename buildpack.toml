@@ -1,0 +1,11 @@
+api = "0.10"
+
+[buildpack]
+  id = "com.example.opencode"
+  version = "0.1.0"
+  name = "OpenCode Installer"
+  homepage = "https://github.com/sst/opencode"
+
+[[stacks]]
+  id = "*"
+

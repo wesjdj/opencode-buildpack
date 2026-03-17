@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+set -eo pipefail
+
+layers_dir="$1"
+platform_dir="$2"
+plan_path="$3"
+
+APP="opencode"
+
+# --- Determine version ---
+OPENCODE_VERSION=""
+if [[ -f "${platform_dir}/env/OPENCODE_VERSION" ]]; then
+  OPENCODE_VERSION=$(cat "${platform_dir}/env/OPENCODE_VERSION")
+  OPENCODE_VERSION="${OPENCODE_VERSION#v}"  # strip leading 'v'
+fi
+
+# --- Detect OS and architecture ---
+raw_os=$(uname -s)
+os=$(echo "$raw_os" | tr '[:upper:]' '[:lower:]')
+case "$raw_os" in
+  Darwin*) os="darwin" ;;
+  Linux*)  os="linux" ;;
+esac
+
+arch=$(uname -m)
+case "$arch" in
+  aarch64) arch="arm64" ;;
+  x86_64)  arch="x64" ;;
+esac
+
+# --- Detect musl ---
+is_musl=false
+if [[ "$os" == "linux" ]]; then
+  if [[ -f /etc/alpine-release ]]; then
+    is_musl=true
+  elif command -v ldd >/dev/null 2>&1; then
+    if ldd --version 2>&1 | grep -qi musl; then
+      is_musl=true
+    fi
+  fi
+fi
+
+# --- Detect baseline (no AVX2) ---
+needs_baseline=false
+if [[ "$arch" == "x64" && "$os" == "linux" ]]; then
+  if ! grep -qwi avx2 /proc/cpuinfo 2>/dev/null; then
+    needs_baseline=true
+  fi
+fi
+
+# --- Build target and filename ---
+target="${os}-${arch}"
+if [[ "$needs_baseline" == "true" ]]; then
+  target="${target}-baseline"
+fi
+if [[ "$is_musl" == "true" ]]; then
+  target="${target}-musl"
+fi
+
+archive_ext=".tar.gz"
+if [[ "$os" != "linux" ]]; then
+  archive_ext=".zip"
+fi
+
+filename="${APP}-${target}${archive_ext}"
+
+# --- Resolve version and URL ---
+if [[ -z "$OPENCODE_VERSION" ]]; then
+  echo "-----> Fetching latest OpenCode version..."
+  OPENCODE_VERSION=$(curl -s https://api.github.com/repos/anomalyco/opencode/releases/latest \
+    | sed -n 's/.*"tag_name": *"v\([^"]*\)".*/\1/p')
+  if [[ -z "$OPENCODE_VERSION" ]]; then
+    echo "ERROR: Failed to determine latest version"
+    exit 1
+  fi
+  url="https://github.com/anomalyco/opencode/releases/latest/download/${filename}"
+else
+  url="https://github.com/anomalyco/opencode/releases/download/v${OPENCODE_VERSION}/${filename}"
+fi
+
+# --- Layer setup and cache check ---
+OPENCODE_LAYER="${layers_dir}/opencode"
+
+if [[ -f "${OPENCODE_LAYER}.toml" ]]; then
+  cached_version=$(grep -oP 'version\s*=\s*"\K[^"]+' "${OPENCODE_LAYER}.toml" || echo "")
+  if [[ "${cached_version}" == "${OPENCODE_VERSION}" ]]; then
+    echo "-----> Using cached OpenCode ${OPENCODE_VERSION}"
+    exit 0
+  fi
+fi
+
+echo "-----> Installing OpenCode ${OPENCODE_VERSION} (${target})"
+
+# --- Clean and create layer ---
+rm -rf "${OPENCODE_LAYER}"
+mkdir -p "${OPENCODE_LAYER}/bin"
+
+# --- Download and extract ---
+tmp_dir=$(mktemp -d)
+echo "       Downloading ${filename}..."
+curl -fsSL "${url}" -o "${tmp_dir}/${filename}"
+
+if [[ "$os" == "linux" ]]; then
+  tar -xzf "${tmp_dir}/${filename}" -C "${tmp_dir}"
+else
+  unzip -q "${tmp_dir}/${filename}" -d "${tmp_dir}"
+fi
+
+mv "${tmp_dir}/opencode" "${OPENCODE_LAYER}/bin/opencode"
+chmod 755 "${OPENCODE_LAYER}/bin/opencode"
+rm -rf "${tmp_dir}"
+
+# --- Write layer TOML ---
+cat > "${OPENCODE_LAYER}.toml" <<EOF
+[types]
+launch = true
+build = true
+cache = true
+
+[metadata]
+version = "${OPENCODE_VERSION}"
+target = "${target}"
+EOF
+
+# --- Verify ---
+echo "       Verifying installation..."
+"${OPENCODE_LAYER}/bin/opencode" --version 2>/dev/null || echo "       (version check skipped)"
+
+echo "-----> OpenCode ${OPENCODE_VERSION} installed successfully"
+

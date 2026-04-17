@@ -1,4 +1,26 @@
 #!/usr/bin/env bash
 set -eo pipefail
-exit 0
 
+if [[ "${BP_RENKU_FRONTENDS:-}" =~ "opencode" ]]; then
+  echo "PASS: The BP_RENKU_FRONTENDS environment variable was found to contain opencode."
+else
+  echo "SKIPPED: The BP_RENKU_FRONTENDS environment variable is not set or does not contain opencode."
+  exit 100
+fi
+
+cat >"${CNB_BUILD_PLAN_PATH}" <<EOL
+[[requires]]
+  name = "renku-env"
+
+[requires.metadata]
+  launch = true
+
+[[provides]]
+  name = "opencode"
+
+[[requires]]
+  name = "opencode"
+
+[requires.metadata]
+  launch = true
+EOL

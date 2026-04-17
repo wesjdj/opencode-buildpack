@@ -1,6 +1,0 @@
-name: opencode-env
-channels:
-  - conda-forge
-dependencies:
-  - jupyterlab
-  - tmux

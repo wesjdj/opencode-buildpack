@@ -1,11 +1,26 @@
-api = "0.10"
+api = "0.11"
 
 [buildpack]
-  id = "com.example.opencode"
+  id = "renku/opencode"
+  name = "OpenCode AI Buildpack"
   version = "0.1.0"
-  name = "OpenCode Installer"
   homepage = "https://github.com/sst/opencode"
+  description = "Installs the opencode AI CLI into a Renku session and wires Renku User Secrets into opencode at launch."
 
-[[stacks]]
-  id = "*"
+[[targets]]
+  os = "linux"
+  arch = "amd64"
 
+[[targets]]
+  os = "linux"
+  arch = "arm64"
+
+[metadata]
+
+  [metadata.default-versions]
+    opencode = "latest"
+
+  [[metadata.dependencies]]
+    id = "opencode"
+    name = "OpenCode"
+    source = "https://github.com/sst/opencode"

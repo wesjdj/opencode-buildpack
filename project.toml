@@ -1,4 +1,12 @@
-[build]
-  [[build.buildpacks]]
-    uri = "."
+# Root project.toml is a *local smoke-test harness* for this buildpack.
+# It lets you run `make sample` (or `pack build`) against the buildpack
+# without leaving the repo. Real Renku projects should consume this
+# buildpack via a project.toml like samples/jupyterlab-opencode/project.toml.
+[_]
+schema-version = "0.2"
 
+[io.buildpacks]
+builder = "ghcr.io/swissdatasciencecenter/renku-frontend-buildpacks/selector:0.4.0"
+
+  [[io.buildpacks.group]]
+  uri = "."

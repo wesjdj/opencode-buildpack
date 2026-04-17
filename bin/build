@@ -1,138 +1,185 @@
 #!/usr/bin/env bash
 set -eo pipefail
 
-layers_dir="$1"
-platform_dir="$2"
-plan_path="$3"
+echo -e "=== 🤖 \033[1mRenku OpenCode buildpack\033[0m ==="
 
-APP="opencode"
-OPENCODE_LAYER="${layers_dir}/opencode"
+# ---------------------------------------------------------------------------
+# Inputs
+# ---------------------------------------------------------------------------
+# BP_OPENCODE_VERSION   - release tag to install (e.g. "v1.4.6"). Default: "latest".
+# BP_OPENCODE_VARIANT   - "auto" (default), "standard", "baseline", "musl",
+#                         or "baseline-musl". "auto" picks baseline when the
+#                         build host lacks AVX2, and musl on Alpine/musl libc.
+# BP_OPENCODE_SECRETS_DIR - default secrets mount dir used at launch. Can also
+#                           be set per-session via env. Default: "/secrets".
 
-# --- Determine version ---
-OPENCODE_VERSION=""
-if [[ -f "${platform_dir}/env/OPENCODE_VERSION" ]]; then
-  OPENCODE_VERSION=$(cat "${platform_dir}/env/OPENCODE_VERSION")
-  OPENCODE_VERSION="${OPENCODE_VERSION#v}"
-fi
+: "${BP_OPENCODE_VERSION:=latest}"
+: "${BP_OPENCODE_VARIANT:=auto}"
+: "${BP_OPENCODE_SECRETS_DIR:=/secrets}"
 
-# --- Detect OS and architecture ---
-raw_os=$(uname -s)
-os=$(echo "$raw_os" | tr '[:upper:]' '[:lower:]')
-case "$raw_os" in
-  Darwin*) os="darwin" ;;
-  Linux*)  os="linux" ;;
+layers_dir="${CNB_LAYERS_DIR}"
+buildpack_dir="${CNB_BUILDPACK_DIR}"
+opencode_layer="${layers_dir}/opencode"
+
+# ---------------------------------------------------------------------------
+# Target resolution (CNB tells us the target arch; variant picks the flavor)
+# ---------------------------------------------------------------------------
+current_arch="$(uname -m)"
+case "${current_arch}" in
+  "aarch64"|"arm64") current_arch="arm64" ;;
+  "amd64"|"x86_64")  current_arch="x64" ;;
+  *) >&2 echo "ERROR: Unsupported build host arch: ${current_arch}"; exit 1 ;;
 esac
 
-arch=$(uname -m)
-case "$arch" in
-  aarch64) arch="arm64" ;;
-  x86_64)  arch="x64" ;;
+target_arch="${CNB_TARGET_ARCH:-}"
+case "${target_arch}" in
+  "arm64"|"aarch64") oc_arch="arm64" ;;
+  "amd64"|"x86_64")  oc_arch="x64" ;;
+  "")                oc_arch="${current_arch}" ;;
+  *) >&2 echo "ERROR: Unsupported CNB target arch: ${target_arch}"; exit 1 ;;
 esac
 
-# --- Detect musl ---
-is_musl=false
-if [[ "$os" == "linux" ]]; then
-  if [[ -f /etc/alpine-release ]]; then
-    is_musl=true
-  elif command -v ldd >/dev/null 2>&1; then
-    if ldd --version 2>&1 | grep -qi musl; then
-      is_musl=true
-    fi
-  fi
+if [ -n "${target_arch}" ] && [ "${oc_arch}" != "${current_arch}" ]; then
+  >&2 echo "ERROR: build host arch (${current_arch}) does not match target (${oc_arch}). Cross-build not supported by opencode tarballs."
+  exit 1
 fi
 
-# --- Detect baseline (no AVX2) ---
-needs_baseline=false
-if [[ "$arch" == "x64" && "$os" == "linux" ]]; then
-  if ! grep -qwi avx2 /proc/cpuinfo 2>/dev/null; then
+variant="${BP_OPENCODE_VARIANT}"
+if [ "${variant}" = "auto" ]; then
+  needs_baseline=false
+  if [ "${oc_arch}" = "x64" ] && ! grep -qwi avx2 /proc/cpuinfo 2>/dev/null; then
     needs_baseline=true
   fi
+  is_musl=false
+  if [ -f /etc/alpine-release ] || (command -v ldd >/dev/null 2>&1 && ldd --version 2>&1 | grep -qi musl); then
+    is_musl=true
+  fi
+  variant="standard"
+  [ "${needs_baseline}" = "true" ] && variant="baseline"
+  [ "${is_musl}"        = "true" ] && variant="${variant/standard/}musl"
+  [ "${is_musl}"        = "true" ] && [ "${needs_baseline}" = "true" ] && variant="baseline-musl"
+  [ -z "${variant}" ] && variant="standard"
 fi
 
-# --- Build target and filename ---
-target="${os}-${arch}"
-if [[ "$needs_baseline" == "true" ]]; then
-  target="${target}-baseline"
-fi
-if [[ "$is_musl" == "true" ]]; then
-  target="${target}-musl"
-fi
+target="linux-${oc_arch}"
+case "${variant}" in
+  standard)        ;;
+  baseline)        target="${target}-baseline" ;;
+  musl)            target="${target}-musl" ;;
+  baseline-musl)   target="${target}-baseline-musl" ;;
+  *) >&2 echo "ERROR: Unknown BP_OPENCODE_VARIANT: ${variant}"; exit 1 ;;
+esac
+filename="opencode-${target}.tar.gz"
 
-archive_ext=".tar.gz"
-if [[ "$os" != "linux" ]]; then
-  archive_ext=".zip"
-fi
-
-filename="${APP}-${target}${archive_ext}"
-
-# --- Resolve version and URL ---
-if [[ -z "$OPENCODE_VERSION" ]]; then
-  echo "-----> Fetching latest OpenCode version..."
-  OPENCODE_VERSION=$(curl -s https://api.github.com/repos/anomalyco/opencode/releases/latest \
-    | sed -n 's/.*"tag_name": *"v\([^"]*\)".*/\1/p')
-  if [[ -z "$OPENCODE_VERSION" ]]; then
-    echo "ERROR: Failed to determine latest version"
+# ---------------------------------------------------------------------------
+# Version resolution
+# ---------------------------------------------------------------------------
+version="${BP_OPENCODE_VERSION#v}"
+if [ "${BP_OPENCODE_VERSION}" = "latest" ]; then
+  echo "  Resolving latest opencode release..."
+  # No auth header: anonymous rate limit is fine for build pipelines;
+  # set GITHUB_TOKEN in the platform env for higher limits if needed.
+  resolved="$(curl -fsSL -H 'Accept: application/vnd.github+json' \
+    https://api.github.com/repos/sst/opencode/releases/latest \
+    | sed -n 's/.*"tag_name": *"\(v[^"]*\)".*/\1/p' | head -n1)"
+  if [ -z "${resolved}" ]; then
+    >&2 echo "ERROR: failed to resolve the latest opencode release tag."
     exit 1
   fi
-  url="https://github.com/anomalyco/opencode/releases/latest/download/${filename}"
+  version="${resolved#v}"
+fi
+
+echo "  Build configuration:"
+echo -e "    \$BP_OPENCODE_VERSION\t${BP_OPENCODE_VERSION}\t(resolved: ${version})"
+echo -e "    \$BP_OPENCODE_VARIANT\t${BP_OPENCODE_VARIANT}\t(resolved: ${variant})"
+echo -e "    target\t\t${target}"
+echo -e "    asset\t\t${filename}"
+
+# ---------------------------------------------------------------------------
+# Layer cache
+# ---------------------------------------------------------------------------
+mkdir -p "${opencode_layer}/bin" "${opencode_layer}/env.launch" "${opencode_layer}/profile.d"
+
+cached_version=""
+cached_target=""
+if [ -f "${opencode_layer}.toml" ]; then
+  cached_version="$(sed -n 's/^version *= *"\(.*\)"/\1/p' "${opencode_layer}.toml")"
+  cached_target="$(sed -n 's/^target *= *"\(.*\)"/\1/p'  "${opencode_layer}.toml")"
+fi
+
+if [ "${cached_version}" = "${version}" ] && [ "${cached_target}" = "${target}" ] && [ -x "${opencode_layer}/bin/opencode" ]; then
+  echo "  Using cached opencode ${version} (${target})"
 else
-  url="https://github.com/anomalyco/opencode/releases/download/v${OPENCODE_VERSION}/${filename}"
-fi
+  echo "  Installing opencode ${version} (${target})"
+  rm -rf "${opencode_layer}/bin"
+  mkdir -p "${opencode_layer}/bin"
 
-# --- Layer cache check ---
-if [[ -f "${OPENCODE_LAYER}.toml" ]]; then
-  cached_version=$(grep -oP 'version\s*=\s*"\K[^"]+' "${OPENCODE_LAYER}.toml" || echo "")
-  if [[ "${cached_version}" == "${OPENCODE_VERSION}" ]]; then
-    echo "-----> Using cached OpenCode ${OPENCODE_VERSION}"
-    # Still need to write env.launch even on cache hit!
-    mkdir -p "${OPENCODE_LAYER}/env.launch"
-    echo -n "${OPENCODE_LAYER}/bin" > "${OPENCODE_LAYER}/env.launch/PATH.prepend"
-    echo -n ":" > "${OPENCODE_LAYER}/env.launch/PATH.delim"
-    exit 0
-  fi
-fi
+  url="https://github.com/sst/opencode/releases/download/v${version}/${filename}"
+  tmp_dir="$(mktemp -d)"
+  trap 'rm -rf "${tmp_dir}"' EXIT
 
-echo "-----> Installing OpenCode ${OPENCODE_VERSION} (${target})"
-
-# --- Clean and create layer ---
-rm -rf "${OPENCODE_LAYER}"
-mkdir -p "${OPENCODE_LAYER}/bin"
-
-# --- Download and extract ---
-tmp_dir=$(mktemp -d)
-echo "       Downloading ${filename}..."
-curl -fsSL "${url}" -o "${tmp_dir}/${filename}"
-
-if [[ "$os" == "linux" ]]; then
+  curl -fsSL "${url}" -o "${tmp_dir}/${filename}"
   tar -xzf "${tmp_dir}/${filename}" -C "${tmp_dir}"
-else
-  unzip -q "${tmp_dir}/${filename}" -d "${tmp_dir}"
+
+  if [ ! -f "${tmp_dir}/opencode" ]; then
+    >&2 echo "ERROR: expected opencode binary at ${tmp_dir}/opencode after extracting ${filename}"
+    exit 1
+  fi
+
+  install -m 0755 "${tmp_dir}/opencode" "${opencode_layer}/bin/opencode"
 fi
 
-mv "${tmp_dir}/opencode" "${OPENCODE_LAYER}/bin/opencode"
-chmod 755 "${OPENCODE_LAYER}/bin/opencode"
-rm -rf "${tmp_dir}"
+# ---------------------------------------------------------------------------
+# PATH wiring + default env for the launch hook
+# ---------------------------------------------------------------------------
+printf "%s" "${opencode_layer}/bin" >"${opencode_layer}/env.launch/PATH.prepend"
+printf ":"                          >"${opencode_layer}/env.launch/PATH.delim"
+printf "%s" "${BP_OPENCODE_SECRETS_DIR}" >"${opencode_layer}/env.launch/RENKU_OPENCODE_SECRETS_DIR.default"
 
-# --- Write layer TOML ---
-cat > "${OPENCODE_LAYER}.toml" <<EOF
+# ---------------------------------------------------------------------------
+# Launch hook that provisions Renku User Secrets into opencode's config paths.
+# Files in <layer>/profile.d/*.sh are sourced by the CNB launcher for every
+# process, so env vars exported here propagate to terminals inside jupyter,
+# vscodium, ttyd, etc.
+# ---------------------------------------------------------------------------
+install -m 0755 "${buildpack_dir}/bin/opencode-init.sh" "${opencode_layer}/profile.d/opencode-init.sh"
+
+# ---------------------------------------------------------------------------
+# Layer metadata (CNB)
+# ---------------------------------------------------------------------------
+cat >"${opencode_layer}.toml" <<EOL
 [types]
 launch = true
-build = true
-cache = true
+build  = false
+cache  = true
 
 [metadata]
-version = "${OPENCODE_VERSION}"
-target = "${target}"
-EOF
+description = "opencode AI CLI for renku sessions"
+version     = "${version}"
+target      = "${target}"
+EOL
 
-# --- Add OpenCode to PATH at launch ---
-mkdir -p "${OPENCODE_LAYER}/env.launch"
-echo -n "${OPENCODE_LAYER}/bin" > "${OPENCODE_LAYER}/env.launch/PATH.prepend"
-echo -n ":" > "${OPENCODE_LAYER}/env.launch/PATH.delim"
+# ---------------------------------------------------------------------------
+# SBOM
+# ---------------------------------------------------------------------------
+cat >"${opencode_layer}.sbom.cdx.json" <<EOL
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.5",
+  "version": 1,
+  "components": [
+    {
+      "type": "application",
+      "name": "opencode",
+      "version": "${version}",
+      "purl": "pkg:github/sst/opencode@v${version}",
+      "externalReferences": [
+        { "type": "vcs",      "url": "https://github.com/sst/opencode" },
+        { "type": "website",  "url": "https://opencode.ai" }
+      ]
+    }
+  ]
+}
+EOL
 
-# --- Verify ---
-echo "       Verifying installation..."
-"${OPENCODE_LAYER}/bin/opencode" --version 2>/dev/null || echo "       (version check skipped)"
-
-echo "-----> OpenCode ${OPENCODE_VERSION} installed successfully"
-
+echo "  opencode ${version} installed to ${opencode_layer}/bin"

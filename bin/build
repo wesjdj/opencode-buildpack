@@ -111,7 +111,7 @@ if [ "${cached_version}" = "${version}" ] && [ "${cached_target}" = "${target}" 
   echo "  Using cached opencode ${version} (${target})"
 else
   echo "  Installing opencode ${version} (${target})"
-  rm -rf "${opencode_layer}/bin"
+  rm -rf "${opencode_layer:?}/bin"
   mkdir -p "${opencode_layer}/bin"
 
   url="https://github.com/sst/opencode/releases/download/v${version}/${filename}"
